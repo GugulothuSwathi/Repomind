@@ -76,5 +76,4 @@ Open the local URL shown by Streamlit in your browser.
 ### Analysis Results - RepoScore & Agent Scores
 ![Results Dashboard](screenshots/results-dashboard.png)
 
-### Full Dashboard with Quick Links
-![Full Dashboard](screenshots/full-dashboard.png)
+

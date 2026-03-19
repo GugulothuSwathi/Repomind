@@ -65,8 +65,16 @@ Open the local URL shown by Streamlit in your browser.
 - `GEMINI_API_KEY`: Google Gemini API key used by AI agents.
 - `GITHUB_TOKEN`: GitHub token used to read repositories and post PR comments.
 
-## Notes
+## Screenshots
 
-- `.env` is gitignored for safety.
-- `.env.example` is committed as a template.
-- For private repositories, ensure your GitHub token has appropriate access.
+### Splash Screen
+![RepoMind Splash Screen](screenshots/splash-screen.png)
+
+### Configuration & Agent Selection
+![Configuration Dashboard](screenshots/configuration.png)
+
+### Analysis Results - RepoScore & Agent Scores
+![Results Dashboard](screenshots/results-dashboard.png)
+
+### Full Dashboard with Quick Links
+![Full Dashboard](screenshots/full-dashboard.png)

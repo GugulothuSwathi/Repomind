@@ -2,10 +2,6 @@
 
 RepoMind is a Streamlit app that analyzes GitHub repositories using multiple AI-powered agents.
 
-## Live App
-
-https://repomind-pyewxn7sxnznqpt52cgaav.streamlit.app/
-
 It provides:
 - Code quality review
 - Security checks
@@ -63,27 +59,6 @@ Copy-Item .env.example .env
 ```
 
 Open the local URL shown by Streamlit in your browser.
-
-## Deploy on Streamlit Cloud
-
-1. Push your latest code to GitHub.
-2. Open Streamlit Cloud: https://share.streamlit.io
-3. Click "New app".
-4. Select your repository: `GugulothuSwathi/Repomind`.
-5. Set branch to `main` and main file path to `app.py`.
-6. In Advanced settings, add Secrets:
-
-```toml
-GEMINI_API_KEY = "your_gemini_key"
-GITHUB_TOKEN = "your_github_token"
-```
-
-7. Click "Deploy".
-
-Notes:
-- `requirements.txt` is used automatically for package install.
-- `runtime.txt` pins Python version for compatibility.
-- Never commit real secrets to `.env` in Git.
 
 ## Environment Variables
 

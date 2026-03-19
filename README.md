@@ -2,6 +2,10 @@
 
 RepoMind is a Streamlit app that analyzes GitHub repositories using multiple AI-powered agents.
 
+## Live App
+
+https://repomind-pyewxn7sxnznqpt52cgaav.streamlit.app/
+
 It provides:
 - Code quality review
 - Security checks

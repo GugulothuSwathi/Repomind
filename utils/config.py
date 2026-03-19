@@ -10,9 +10,23 @@ from dotenv import load_dotenv
 # Load .env file automatically when this module is imported
 load_dotenv()
 
+
+def _get_secret(name: str, default: str = "") -> str:
+    """Read secrets from env first, then Streamlit Cloud secrets."""
+    value = os.getenv(name, "")
+    if value:
+        return value
+
+    try:
+        import streamlit as st
+
+        return str(st.secrets.get(name, default))
+    except Exception:
+        return default
+
 # ---- API Keys ----
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GITHUB_TOKEN   = os.getenv("GITHUB_TOKEN", "")
+GEMINI_API_KEY = _get_secret("GEMINI_API_KEY", "")
+GITHUB_TOKEN   = _get_secret("GITHUB_TOKEN", "")
 
 # ---- Model Settings ----
 # gemini-1.5-flash is FREE and very fast — perfect for hackathon

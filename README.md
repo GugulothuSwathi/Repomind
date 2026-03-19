@@ -41,7 +41,7 @@ It provides:
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install --upgrade pip
-pip install streamlit plotly pandas python-dotenv google-generativeai PyGithub requests reportlab
+pip install -r requirements.txt
 ```
 
 ### Configure environment variables

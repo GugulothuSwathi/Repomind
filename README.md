@@ -12,6 +12,21 @@ It provides:
 - Repository time-machine timeline
 - PDF report export
 
+## What's New
+
+Recent updates focused on chatbot quality, performance, and reliability:
+
+- Chatbot now distinguishes between:
+  - Questions about **RepoMind the app** (for example: "what is this app about?")
+  - Questions about the **analyzed repository**
+- Improved chatbot answer quality with better prompt routing and safer fallbacks.
+- Faster analysis flow:
+  - Removed unnecessary UI wait delays
+  - Added caching for repository metadata/files/requirements
+  - Parallelized independent agent execution
+  - Reduced heavy dependency checks to speed up runs
+- Better SSL troubleshooting for Gemini API certificate-chain errors.
+
 ## Tech Stack
 
 - Python
@@ -64,6 +79,24 @@ Open the local URL shown by Streamlit in your browser.
 
 - `GEMINI_API_KEY`: Google Gemini API key used by AI agents.
 - `GITHUB_TOKEN`: GitHub token used to read repositories and post PR comments.
+- `GEMINI_CA_BUNDLE` (optional): Path to a PEM certificate bundle for environments with SSL interception/proxy.
+
+### Optional SSL Fix (only if needed)
+
+If you see errors like `CERTIFICATE_VERIFY_FAILED` or `self-signed certificate in certificate chain`:
+
+1. Export your organization/root CA cert as a `.pem` file.
+2. Set `GEMINI_CA_BUNDLE` in `.env`.
+3. Restart the app.
+
+Example (Windows):
+
+```env
+GEMINI_CA_BUNDLE=C:\certs\company-root-ca.pem
+```
+
+> This is **not required** for Gemini free tier by itself.  
+> Use it only when your network/proxy causes SSL trust issues.
 
 ## Screenshots
 

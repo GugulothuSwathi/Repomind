@@ -66,7 +66,8 @@ def run_dependency_agent(files: dict[str, str], requirements_content: str = "") 
     vulnerabilities = []
     outdated     = []
 
-    for pkg in packages[:25]:
+    # Keep network-bound checks bounded for responsive UX.
+    for pkg in packages[:12]:
         print(f"   Checking: {pkg['name']} {pkg['version']}")
 
         vulns          = _check_osv_vulnerabilities(pkg["name"], pkg["version"])

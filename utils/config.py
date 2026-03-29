@@ -27,10 +27,11 @@ def _get_secret(name: str, default: str = "") -> str:
 # ---- API Keys ----
 GEMINI_API_KEY = _get_secret("GEMINI_API_KEY", "")
 GITHUB_TOKEN   = _get_secret("GITHUB_TOKEN", "")
+GEMINI_CA_BUNDLE = _get_secret("GEMINI_CA_BUNDLE", "")
 
 # ---- Model Settings ----
-# gemini-1.5-flash is FREE and very fast — perfect for hackathon
-GEMINI_MODEL = "gemini-2.0-flash"
+# gemini-1.5-flash is fast and reliable with better free tier quota
+GEMINI_MODEL = "gemini-1.5-flash"
 
 # ---- Risk Score Weights ----
 # These weights decide how the overall risk score is calculated.

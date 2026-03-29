@@ -19,6 +19,7 @@ import json
 import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Import our utilities
 from utils.config import APP_NAME, APP_TAGLINE
@@ -38,6 +39,25 @@ from utils.time_machine_ui       import show_time_machine
 from collections import defaultdict
 from pdf_generator import generate_repomind_report
 import streamlit.components.v1 as components
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _cached_repo_info(github_url: str) -> dict:
+    """Cache repository metadata to avoid repeated GitHub API round-trips."""
+    return get_repo_info(github_url)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _cached_repo_files(github_url: str, max_files: int, max_dirs: int) -> dict[str, str]:
+    """Cache fetched repository files for faster repeat analysis runs."""
+    return get_repo_files(github_url, max_files=max_files, max_dirs=max_dirs)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _cached_requirements_txt(github_url: str) -> str:
+    """Cache requirements lookup to reduce extra API calls."""
+    return get_requirements_txt(github_url)
+
 # ============================================
 # PAGE CONFIGURATION
 # This MUST be the first Streamlit command!
@@ -1158,7 +1178,7 @@ if not st.session_state.analysis_complete:
                 progress_bar.progress(5)
                 _update_elapsed()
 
-                repo_info = get_repo_info(github_url)
+                repo_info = _cached_repo_info(github_url)
                 st.session_state.repo_info = repo_info
 
                 if "error" in repo_info:
@@ -1175,11 +1195,12 @@ if not st.session_state.analysis_complete:
                     fetch_progress = 5 + min(9, file_count // 6 + dirs_scanned // 10)
                     progress_bar.progress(fetch_progress)
 
-                files = get_repo_files(
+                # Use cached fetch (when available) for substantial speed-ups on re-analysis.
+                # Keep limits moderate to reduce API calls on large repositories.
+                files = _cached_repo_files(
                     github_url,
-                    max_files=70,
-                    max_dirs=90,
-                    progress_callback=_on_fetch_progress,
+                    max_files=55,
+                    max_dirs=70,
                 )
                 st.session_state.repo_files = files
                 st.session_state.analyzed_url = github_url
@@ -1189,7 +1210,7 @@ if not st.session_state.analysis_complete:
                     st.error(f"❌ {files['ERROR']}")
                     st.stop()
 
-                requirements = get_requirements_txt(github_url)
+                requirements = _cached_requirements_txt(github_url)
 
                 repo_open_seconds = time.perf_counter() - fetch_start
                 repo_open_text.caption(f"📂 Repository open time: {repo_open_seconds:.1f}s")
@@ -1198,43 +1219,68 @@ if not st.session_state.analysis_complete:
                 status_text.markdown(f"**✅ Fetched {len(files)} files from {repo_info['name']}**")
                 progress_bar.progress(15)
                 _update_elapsed()
-                time.sleep(0.3)
 
-                # Step 2: Code Review Agent
-                if run_code_review:
-                    status_text.markdown("**🔍 Running Code Review Agent...**")
-                    results["code_review"] = run_code_review_agent(files)
-                    progress_bar.progress(30)
-                    _update_elapsed()
-                    status_text.markdown(f"**✅ Code Review: Found {len(results['code_review'].get('issues', []))} issues**")
-                    time.sleep(0.2)
+                # Step 2-5,8,10: Run independent agents in parallel
+                status_text.markdown("**⚙️ Running selected agents in parallel...**")
+                future_to_agent = {}
+                with ThreadPoolExecutor(max_workers=6) as pool:
+                    if run_code_review:
+                        future_to_agent[pool.submit(run_code_review_agent, files)] = "code_review"
+                    if run_security:
+                        future_to_agent[pool.submit(run_security_agent, files)] = "security"
+                    if run_docs:
+                        future_to_agent[pool.submit(run_documentation_agent, files)] = "documentation"
+                    if run_deps:
+                        future_to_agent[pool.submit(run_dependency_agent, files, requirements)] = "dependency"
+                    if run_arch:
+                        future_to_agent[pool.submit(run_architecture_agent, files, repo_info)] = "architecture"
+                    if run_time_machine:
+                        future_to_agent[pool.submit(run_time_machine_agent, github_url, max_commits=8)] = "time_machine"
 
-                # Step 3: Security Agent
-                if run_security:
-                    status_text.markdown("**🔒 Running Security Agent...**")
-                    results["security"] = run_security_agent(files)
-                    progress_bar.progress(45)
-                    _update_elapsed()
-                    status_text.markdown(f"**✅ Security: Found {results['security'].get('total_found', 0)} vulnerabilities**")
-                    time.sleep(0.2)
+                    total_parallel = max(1, len(future_to_agent))
+                    completed_parallel = 0
+                    for fut in as_completed(future_to_agent):
+                        agent_name = future_to_agent[fut]
+                        agent_result = fut.result()
+                        completed_parallel += 1
 
-                # Step 4: Documentation Agent
-                if run_docs:
-                    status_text.markdown("**📄 Running Documentation Agent...**")
-                    results["documentation"] = run_documentation_agent(files)
-                    progress_bar.progress(55)
-                    _update_elapsed()
-                    status_text.markdown(f"**✅ Documentation: Score {results['documentation'].get('score', 0)}/100**")
-                    time.sleep(0.2)
+                        if agent_name == "time_machine":
+                            st.session_state.time_machine_result = agent_result
+                            if agent_result.get("error"):
+                                status_text.markdown(f"**⚠️ Time Machine: {agent_result['error'][:80]}**")
+                            else:
+                                status_text.markdown(
+                                    f"**✅ Time Machine: Analyzed {len(agent_result.get('commits', []))} commits** "
+                                    f"({completed_parallel}/{total_parallel})"
+                                )
+                        else:
+                            results[agent_name] = agent_result
+                            if agent_name == "code_review":
+                                status_text.markdown(
+                                    f"**✅ Code Review: Found {len(agent_result.get('issues', []))} issues** "
+                                    f"({completed_parallel}/{total_parallel})"
+                                )
+                            elif agent_name == "security":
+                                status_text.markdown(
+                                    f"**✅ Security: Found {agent_result.get('total_found', 0)} vulnerabilities** "
+                                    f"({completed_parallel}/{total_parallel})"
+                                )
+                            elif agent_name == "documentation":
+                                status_text.markdown(
+                                    f"**✅ Documentation: Score {agent_result.get('score', 0)}/100** "
+                                    f"({completed_parallel}/{total_parallel})"
+                                )
+                            elif agent_name == "dependency":
+                                status_text.markdown(
+                                    f"**✅ Dependencies: {agent_result.get('total_packages', 0)} packages analyzed** "
+                                    f"({completed_parallel}/{total_parallel})"
+                                )
+                            elif agent_name == "architecture":
+                                status_text.markdown(f"**✅ Architecture diagram generated** ({completed_parallel}/{total_parallel})")
 
-                # Step 5: Dependency Agent
-                if run_deps:
-                    status_text.markdown("**📦 Running Dependency Agent...**")
-                    results["dependency"] = run_dependency_agent(files, requirements)
-                    progress_bar.progress(65)
-                    _update_elapsed()
-                    status_text.markdown(f"**✅ Dependencies: {results['dependency'].get('total_packages', 0)} packages analyzed**")
-                    time.sleep(0.2)
+                        progress = 15 + int((completed_parallel / total_parallel) * 65)
+                        progress_bar.progress(min(progress, 90))
+                        _update_elapsed()
 
                 # Step 6: Bug Fix Agent
                 if run_bugfix and "security" in results and "code_review" in results:
@@ -1247,7 +1293,6 @@ if not st.session_state.analysis_complete:
                     progress_bar.progress(75)
                     _update_elapsed()
                     status_text.markdown(f"**✅ Bug Fix: Generated {results['bug_fix'].get('stats', {}).get('total_patches', 0)} patches**")
-                    time.sleep(0.2)
 
                 # Step 7: Risk Heatmap Agent
                 if run_heatmap and "security" in results and "code_review" in results:
@@ -1261,18 +1306,8 @@ if not st.session_state.analysis_complete:
                     progress_bar.progress(85)
                     _update_elapsed()
                     status_text.markdown(f"**✅ Risk Heatmap: Overall risk {results['risk_heatmap'].get('overall_risk_score', 0)}/100**")
-                    time.sleep(0.2)
 
-                # Step 8: Architecture Agent
-                if run_arch:
-                    status_text.markdown("**🏗️ Running Architecture Agent...**")
-                    results["architecture"] = run_architecture_agent(files, repo_info)
-                    progress_bar.progress(93)
-                    _update_elapsed()
-                    status_text.markdown("**✅ Architecture diagram generated!**")
-                    time.sleep(0.2)
-
-                # Step 9: Initialize Chatbot
+                # Step 8: Initialize Chatbot
                 if run_chatbot_init:
                     status_text.markdown("**🤖 Initializing Repository Chatbot...**")
                     chatbot = RepoChatbot()
@@ -1285,136 +1320,21 @@ if not st.session_state.analysis_complete:
                     progress_bar.progress(97)
                     _update_elapsed()
                     status_text.markdown("**✅ Chatbot ready! Ask me anything about the repo.**")
-                if run_time_machine:
-                    status_text.markdown("**⏳ Running Time Machine Agent...**")
-                    tm_result = run_time_machine_agent(github_url, max_commits=12)
-                    st.session_state.time_machine_result = tm_result
-                    progress_bar.progress(100)
-                    _update_elapsed()
-                    if tm_result.get("error"):
-                        status_text.markdown(f"**⚠️ Time Machine: {tm_result['error'][:80]}**")
-                    else:
-                        status_text.markdown(f"**✅ Time Machine: Analyzed {len(tm_result.get('commits', []))} commits!**")
+
+                progress_bar.progress(100)
+                _update_elapsed()
 
                 # ---- Save results and show dashboard ----
                 st.session_state.results = results
                 st.session_state.analysis_complete = True
                 st.session_state.dashboard_open_fx = True
 
-                time.sleep(0.5)
                 st.rerun()  # Refresh to show dashboard
 
             except Exception as e:
                 st.error(f"❌ Analysis failed: {str(e)}")
                 st.exception(e)  # Show full traceback for debugging
 
-
-# ============================================
-# DASHBOARD - Show results after analysis
-# ============================================
-if False and st.session_state.analysis_complete:
-
-    results   = st.session_state.results
-    repo_info = st.session_state.repo_info
-
-    # ---- Repo Header ----
-    st.markdown(f"""
-    <div style="background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 20px; margin-bottom: 24px;">
-        <h2 style="margin:0; color: #58a6ff;">📦 {repo_info.get('name', 'Repository')}</h2>
-        <p style="color: #8b949e; margin: 4px 0;">{repo_info.get('description', '')}</p>
-        <p style="color: #8b949e; font-size: 0.85rem; margin: 0;">
-            ⭐ {repo_info.get('stars', 0)} stars  |  
-            🍴 {repo_info.get('forks', 0)} forks  |  
-            ⚠️ {repo_info.get('open_issues', 0)} open issues  |  
-            🔤 {repo_info.get('language', 'Unknown')}
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # ---- RepoScore (the "wow" single number) ----
-    _display_repo_score(results)
-
-    # ---- Agent Result Tabs ----
-    tabs = st.tabs([
-        "🔍 Code Review",
-        "🔒 Security",
-        "📄 Docs",
-        "📦 Dependencies",
-        "🔧 Auto-Fix",
-        "🗺️ Risk Heatmap",
-        "🏗️ Architecture",
-        "🤖 Chatbot",
-        "⏳ Time Machine",
-    ])
-
-    # TAB 1: Code Review
-    with tabs[0]:
-        _show_code_review(results.get("code_review", {}))
-
-    # TAB 2: Security
-    with tabs[1]:
-        _show_security(results.get("security", {}))
-
-    # TAB 3: Documentation
-    with tabs[2]:
-        _show_documentation(results.get("documentation", {}))
-
-    # TAB 4: Dependencies
-    with tabs[3]:
-        _show_dependencies(results.get("dependency", {}))
-
-    # TAB 5: Bug Fix
-    with tabs[4]:
-        _show_bug_fixes(results.get("bug_fix", {}))
-
-    # TAB 6: Risk Heatmap
-    with tabs[5]:
-        _show_risk_heatmap(results.get("risk_heatmap", {}))
-
-    # TAB 7: Architecture
-    with tabs[6]:
-        _show_architecture(results.get("architecture", {}))
-
-    # TAB 8: Chatbot
-    with tabs[7]:
-        _show_chatbot()
-    with tabs[8]:
-        show_time_machine(st.session_state.get("time_machine_result") or {})
-    # ---- PDF Download ----
-    st.markdown("---")
-    st.markdown("### 📥 Download Report")
-    col_pdf1, col_pdf2, col_pdf3 = st.columns([1, 1, 2])
-    with col_pdf1:
-        if st.button("📄 Generate PDF Report", use_container_width=True):
-            with st.spinner("📄 Generating PDF..."):
-                try:
-                    pdf_bytes = generate_repomind_report(
-                        st.session_state.results,
-                        st.session_state.repo_info
-                    )
-                    repo_name = st.session_state.repo_info.get("name","repo")
-                    st.download_button(
-                        label="⬇️ Download PDF",
-                        data=pdf_bytes,
-                        file_name=f"repomind_{repo_name}_report.pdf",
-                        mime="application/pdf",
-                        use_container_width=True,
-                    )
-                    st.success("✅ PDF ready! Click Download PDF above.")
-                except Exception as e:
-                    st.error(f"❌ PDF error: {str(e)}")
-
-    _show_pr_comment_section(results, repo_info) 
-     # ---- Reset Button ----
-    st.markdown("---")
-    if st.button("🔄 Analyze Another Repository"):
-        st.session_state.analysis_complete = False
-        st.session_state.results           = {}
-        st.session_state.chatbot           = None
-        st.session_state.chat_history      = []
-        st.session_state.repo_files        = {}
-        st.session_state.repo_info         = {}
-        st.rerun()
 
 
 # ============================================
@@ -3124,7 +3044,7 @@ def _draw_architecture_plotly_v2(components: list, edges: list):
         name       = comp["name"]
         x, y       = positions[name]
         file_count = comp.get("file_count", len(comp.get("files", [])))
-        color      = _get_color(idx)        # always a valid hex color
+        color      = _PALETTE[idx % len(_PALETTE)]  # Get color from palette
         size       = max(40, min(75, 28 + file_count * 5))
         icon       = comp.get("icon", "📁")
 
@@ -3503,140 +3423,150 @@ def _draw_architecture_plotly(components: list, edges: list) -> "go.Figure":
 
     return fig
 # ============================================================
-# PASTE THIS ENTIRE FUNCTION INTO app.py
-# Replace the existing _show_chatbot() function with this one
-# ============================================================
+
 
 def _show_chatbot():
-    """Display the enhanced Repository Chatbot with Time Machine RAG."""
+    """Display the Repository Chatbot."""
     st.markdown("### 🤖 Repository Knowledge Chatbot")
 
-    chatbot = st.session_state.chatbot
+    chatbot = st.session_state.get("chatbot")
 
     if not chatbot or not chatbot.is_indexed:
         st.warning("⚠️ Chatbot not initialized. Please run the analysis first.")
         return
 
-    # ── Feed time machine data into chatbot if available ──────────────────
+    # Feed time machine into chatbot if available
     tm_result = st.session_state.get("time_machine_result")
     if tm_result and not chatbot.time_machine:
-        chatbot.time_machine  = tm_result
-        chatbot.repo_summary  = chatbot._create_repo_summary()
+        chatbot.time_machine = tm_result
+        chatbot.repo_summary = chatbot._create_repo_summary()
 
-    # ── Description ───────────────────────────────────────────────────────
+    # Description
     st.markdown(
-        "<div style='background:#162032;border:1px solid #1f6feb;border-radius:10px;"
-        "padding:14px;margin-bottom:16px;'>"
-        "🧠 Ask me anything about this repository in natural language. "
-        "I know the <b>code files</b>, <b>security issues</b>, <b>commit history</b>, "
-        "<b>risk timeline</b>, <b>architecture</b>, and <b>predicted future risks</b>."
+        "<div style='background:#162032;border:1px solid #1f6feb;"
+        "border-radius:10px;padding:14px;margin-bottom:16px;'>"
+        "🧠 Ask about <b>RepoMind</b> (this app) or <b>your analyzed repository</b>—"
+        "code, security, architecture, dependencies, and history."
         "</div>",
         unsafe_allow_html=True,
     )
 
-    # ── Suggested questions — grouped by category ─────────────────────────
-    st.markdown("**💡 Try asking:**")
+    # ── Quick Questions ───────────────────────────────────────────
+    st.markdown("**💡 Quick Questions:**")
 
-    tab_code, tab_security, tab_timeline, tab_predict = st.tabs([
-        "📦 Code & Architecture",
-        "🔒 Security & Risk",
-        "⏳ Timeline & History",
-        "🔮 Predictions",
-    ])
+    quick_questions = [
+        ("📊 Overview",          "Give me an overview of this repository"),
+        ("🔒 Security",          "What are the security vulnerabilities?"),
+        ("🔍 Code Quality",      "What are the main code quality issues?"),
+        ("🏗️ Architecture",     "Explain the repository architecture"),
+        ("📦 Dependencies",      "Are there any vulnerable dependencies?"),
+        ("🔧 Patches",           "What auto-patches were generated?"),
+        ("📄 Documentation",     "What is the documentation quality?"),
+        ("⏳ Commit History",    "Show me the commit history"),
+        ("🗺️ Risky Files",      "Which files are most risky?"),
+        ("🛠️ Tech Stack",       "What frameworks are being used?"),
+    ]
 
-    def _quick_ask(suggestion: str, key: str):
-        if st.button(suggestion, key=key, use_container_width=True):
-            st.session_state.chat_history.append({"role": "user", "content": suggestion})
-            with st.spinner("🤔 Thinking..."):
-                response = chatbot.ask(suggestion)
-            st.session_state.chat_history.append({
-                "role":    "assistant",
-                "content": response["answer"],
-                "files":   response.get("relevant_files", []),
-                "commits": response.get("relevant_commits", []),
-            })
-            st.rerun()
-
-    with tab_code:
-        c1, c2 = st.columns(2)
-        with c1:
-            _quick_ask("Explain the overall architecture", "q_arch")
-            _quick_ask("What frameworks are being used?", "q_fw")
-        with c2:
-            _quick_ask("Which file has the most issues?", "q_issues")
-            _quick_ask("How is the codebase structured?", "q_struct")
-
-    with tab_security:
-        c1, c2 = st.columns(2)
-        with c1:
-            _quick_ask("What are the biggest security risks?", "q_sec")
-            _quick_ask("Which files are most dangerous?", "q_danger")
-        with c2:
-            _quick_ask("Are there any vulnerable dependencies?", "q_dep")
-            _quick_ask("What is the overall risk level?", "q_risk")
-
-    with tab_timeline:
-        c1, c2 = st.columns(2)
-        with c1:
-            _quick_ask("Show me the commit history", "q_commits")
-            _quick_ask("Which files caused most issues in recent commits?", "q_recent")
-        with c2:
-            _quick_ask("How has the risk changed over time?", "q_risktrend")
-            _quick_ask("Who made the most changes?", "q_authors")
-
-    with tab_predict:
-        c1, c2 = st.columns(2)
-        with c1:
-            _quick_ask("Predict risky files for next month", "q_pred")
-            _quick_ask("Which files will likely have bugs?", "q_bugs")
-        with c2:
-            _quick_ask("What should we fix first?", "q_fix")
-            _quick_ask("Show high churn files", "q_churn")
+    # Show as 2-column grid of buttons
+    rows = [quick_questions[i:i+2] for i in range(0, len(quick_questions), 2)]
+    for row in rows:
+        cols = st.columns(2)
+        for col, (label, question) in zip(cols, row):
+            # Use unique key based on question text
+            btn_key = f"quick_{hash(question) % 100000}"
+            if col.button(label, key=btn_key, use_container_width=True):
+                # Add to history and get answer
+                st.session_state.chat_history.append({
+                    "role": "user", "content": question
+                })
+                with st.spinner("🤔 Thinking..."):
+                    response = chatbot.ask(question)
+                st.session_state.chat_history.append({
+                    "role":    "assistant",
+                    "content": response["answer"],
+                    "files":   response.get("relevant_files", []),
+                    "commits": response.get("relevant_commits", []),
+                })
+                st.rerun()
 
     st.markdown("---")
 
-    # ── Chat history ──────────────────────────────────────────────────────
-    for message in st.session_state.chat_history:
-        if message["role"] == "user":
-            st.markdown(
-                f"<div class='chat-user'>👤 <strong>You</strong><br>{message['content']}</div>",
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                f"<div class='chat-bot'>🧠 <strong>RepoMind</strong><br>{message['content']}</div>",
-                unsafe_allow_html=True,
-            )
-            # Show source references
-            refs = []
-            if message.get("files"):
-                refs.append(f"📂 Files: {', '.join(message['files'][:3])}")
-            if message.get("commits"):
-                refs.append(f"🔖 Commits: {', '.join(message['commits'][:3])}")
-            if refs:
-                st.markdown(f"<small style='color:#8b949e;'>{' &nbsp;|&nbsp; '.join(refs)}</small>", unsafe_allow_html=True)
+    # ── Chat History ─────────────────────────────────────────────
+    if not st.session_state.chat_history:
+        st.markdown(
+            "<div style='text-align:center;color:#8b949e;padding:20px;'>"
+            "Ask a question above to get started!"
+            "</div>",
+            unsafe_allow_html=True
+        )
+    else:
+        for message in st.session_state.chat_history:
+            if message["role"] == "user":
+                st.markdown(
+                    f"<div style='background:#1c2128;border:1px solid #30363d;"
+                    f"border-radius:12px 12px 4px 12px;padding:12px 16px;margin:8px 0;'>"
+                    f"👤 <b>You</b><br>{message['content']}"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                # Format answer — convert markdown-like to HTML
+                answer = message["content"]
+                st.markdown(
+                    f"<div style='background:#162032;border:1px solid #1f6feb;"
+                    f"border-radius:12px 12px 12px 4px;padding:12px 16px;margin:8px 0;'>"
+                    f"🧠 <b>RepoMind</b><br>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+                # Render answer as proper markdown (handles bold, bullets etc)
+                st.markdown(answer)
 
-    # ── Input ─────────────────────────────────────────────────────────────
+                # Show source files if any
+                files   = message.get("files", [])
+                commits = message.get("commits", [])
+                if files or commits:
+                    refs = []
+                    if files:
+                        refs.append(f"📂 `{'`, `'.join(files[:3])}`")
+                    if commits:
+                        refs.append(f"🔖 {', '.join(commits[:2])}")
+                    st.markdown(
+                        f"<small style='color:#8b949e;'>"
+                        f"Sources: {' | '.join(refs)}</small>",
+                        unsafe_allow_html=True
+                    )
+
+    # ── Input Box ─────────────────────────────────────────────────
     st.markdown("---")
-    user_input = st.text_input(
-        "Ask anything...",
-        placeholder='e.g. "Which files caused most bugs last 3 commits?" or "Show architecture before latest commit"',
-        key="chat_input",
-        label_visibility="collapsed",
-    )
+    st.markdown("**💬 Ask your own question:**")
 
-    col_send, col_clear = st.columns([1, 5])
-    with col_send:
-        send_clicked = st.button("Send 💬", use_container_width=True)
-    with col_clear:
-        if st.button("🗑️ Clear chat", use_container_width=False):
-            st.session_state.chat_history = []
-            st.rerun()
+    # IMPORTANT: Use a form to prevent redirect on submit
+    with st.form(key="chat_form", clear_on_submit=True):
+        user_input = st.text_input(
+            "Your question",
+            placeholder='e.g. "Which file has the most vulnerabilities?"',
+            label_visibility="collapsed",
+        )
+        col_send, col_clear = st.columns([1, 1])
+        with col_send:
+            submitted = st.form_submit_button(
+                "Send 💬",
+                use_container_width=True,
+            )
+        with col_clear:
+            cleared = st.form_submit_button(
+                "🗑️ Clear Chat",
+                use_container_width=True,
+            )
 
-    if send_clicked and user_input:
-        st.session_state.chat_history.append({"role": "user", "content": user_input})
+    if submitted and user_input and user_input.strip():
+        st.session_state.chat_history.append({
+            "role": "user",
+            "content": user_input.strip()
+        })
         with st.spinner("🤔 Thinking..."):
-            response = chatbot.ask(user_input)
+            response = chatbot.ask(user_input.strip())
         st.session_state.chat_history.append({
             "role":    "assistant",
             "content": response["answer"],
@@ -3645,179 +3575,11 @@ def _show_chatbot():
         })
         st.rerun()
 
-
-# ============================================
-# DASHBOARD - Show results after analysis
-# Defined after display functions so helpers exist when called.
-# ============================================
-if st.session_state.analysis_complete:
-
-    results   = st.session_state.results
-    repo_info = st.session_state.repo_info
-
-    if st.session_state.get("dashboard_open_fx", False):
-        st.markdown(
-            """
-            <style>
-            .main .block-container > div[data-testid="stVerticalBlock"] > div {
-                animation: agentPanelReveal 0.62s cubic-bezier(0.16, 1, 0.3, 1);
-                animation-fill-mode: both;
-                will-change: transform, opacity;
-            }
-            .main .block-container > div[data-testid="stVerticalBlock"] > div:nth-child(1) { animation-delay: 0.02s; }
-            .main .block-container > div[data-testid="stVerticalBlock"] > div:nth-child(2) { animation-delay: 0.05s; }
-            .main .block-container > div[data-testid="stVerticalBlock"] > div:nth-child(3) { animation-delay: 0.08s; }
-            .main .block-container > div[data-testid="stVerticalBlock"] > div:nth-child(4) { animation-delay: 0.11s; }
-            .main .block-container > div[data-testid="stVerticalBlock"] > div:nth-child(5) { animation-delay: 0.14s; }
-            .main .block-container > div[data-testid="stVerticalBlock"] > div:nth-child(6) { animation-delay: 0.17s; }
-            .main .block-container > div[data-testid="stVerticalBlock"] > div:nth-child(7) { animation-delay: 0.20s; }
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.session_state.dashboard_open_fx = False
-
-    # ---- Repo Header ----
-    analyzed_url = st.session_state.get("analyzed_url", "")
-    if analyzed_url:
-        st.caption(f"Analyzed URL: {analyzed_url}")
-
-    st.markdown(f"""
-    <div style="background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 20px; margin-bottom: 24px;">
-        <h2 style="margin:0; color: #58a6ff;">📦 {repo_info.get('name', 'Repository')}</h2>
-        <p style="color: #8b949e; margin: 4px 0;">{repo_info.get('description', '')}</p>
-        <p style="color: #8b949e; font-size: 0.85rem; margin: 0;">
-            ⭐ {repo_info.get('stars', 0)} stars  |  
-            🍴 {repo_info.get('forks', 0)} forks  |  
-            ⚠️ {repo_info.get('open_issues', 0)} open issues  |  
-            🔤 {repo_info.get('language', 'Unknown')}
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # ---- RepoScore (the "wow" single number) ----
-    _display_repo_score(results)
-
-    # ---- Agent Result Tabs ----
-    tabs = st.tabs([
-        "🔍 Code Review",
-        "🔒 Security",
-        "📄 Docs",
-        "📦 Dependencies",
-        "🔧 Auto-Fix",
-        "🗺️ Risk Heatmap",
-        "🏗️ Architecture",
-        "🤖 Chatbot",
-        "⏳ Time Machine",
-    ])
-
-    # TAB 1: Code Review
-    with tabs[0]:
-        _show_code_review(results.get("code_review", {}))
-
-    # TAB 2: Security
-    with tabs[1]:
-        _show_security(results.get("security", {}))
-
-    # TAB 3: Documentation
-    with tabs[2]:
-        _show_documentation(results.get("documentation", {}))
-
-    # TAB 4: Dependencies
-    with tabs[3]:
-        _show_dependencies(results.get("dependency", {}))
-
-    # TAB 5: Bug Fix
-    with tabs[4]:
-        _show_bug_fixes(results.get("bug_fix", {}))
-
-    # TAB 6: Risk Heatmap
-    with tabs[5]:
-        _show_risk_heatmap(results.get("risk_heatmap", {}))
-
-    # TAB 7: Architecture
-    with tabs[6]:
-        _show_architecture(results.get("architecture", {}))
-
-    # TAB 8: Chatbot
-    with tabs[7]:
-        _show_chatbot()
-    with tabs[8]:
-        show_time_machine(st.session_state.get("time_machine_result") or {})
-
-    # ---- PDF Download ----
-    st.markdown("---")
-    st.markdown("### 📥 Download Report")
-    col_pdf1, col_pdf2, col_pdf3 = st.columns([1, 1, 2])
-    with col_pdf1:
-        if st.button("📄 Generate PDF Report", use_container_width=True, key="generate_pdf_active"):
-            with st.spinner("📄 Generating PDF..."):
-                try:
-                    pdf_bytes = generate_repomind_report(
-                        st.session_state.results,
-                        st.session_state.repo_info,
-                    )
-                    repo_name = st.session_state.repo_info.get("name", "repo")
-                    st.download_button(
-                        label="⬇️ Download PDF",
-                        data=pdf_bytes,
-                        file_name=f"repomind_{repo_name}_report.pdf",
-                        mime="application/pdf",
-                        use_container_width=True,
-                        key="download_pdf_active",
-                    )
-                    st.success("✅ PDF ready! Click Download PDF above.")
-                except Exception as e:
-                    st.error(f"❌ PDF error: {str(e)}")
-
-    # ---- Final Full PDF (All Agents + Time Machine) ----
-    st.markdown("### ✅ Final Full Analysis PDF")
-    st.caption("This final report includes all agent outputs including Time Machine analysis.")
-    with st.container():
-        if st.button("🧾 Generate Final Full PDF", use_container_width=True, key="generate_full_pdf_end"):
-            with st.spinner("🧾 Building final full analysis PDF..."):
-                try:
-                    full_results = dict(st.session_state.results)
-                    full_results["time_machine"] = st.session_state.get("time_machine_result") or {}
-
-                    full_pdf_bytes = generate_repomind_report(
-                        full_results,
-                        st.session_state.repo_info,
-                    )
-                    repo_name = st.session_state.repo_info.get("name", "repo")
-                    st.download_button(
-                        label="⬇️ Download Final Full PDF",
-                        data=full_pdf_bytes,
-                        file_name=f"repomind_{repo_name}_full_analysis_report.pdf",
-                        mime="application/pdf",
-                        use_container_width=True,
-                        key="download_full_pdf_end",
-                    )
-                    st.success("✅ Final full PDF is ready. Click Download Final Full PDF.")
-                except Exception as e:
-                    st.error(f"❌ Final PDF error: {str(e)}")
-
-
-    # ---- Reset Button ----
-    st.markdown("---")
-    if st.button("🔄 Analyze Another Repository"):
-        st.session_state.analysis_complete = False
-        st.session_state.results           = {}
-        st.session_state.chatbot           = None
-        st.session_state.chat_history      = []
-        st.session_state.repo_files        = {}
-        st.session_state.repo_info         = {}
+    if cleared:
+        st.session_state.chat_history = []
         st.rerun()
-def _patch_language(filepath: str) -> str:
-    ext_map = {".py":"python",".js":"javascript",".ts":"typescript",
-               ".cs":"csharp",".java":"java",".go":"go"}
-    for ext, lang in ext_map.items():
-        if filepath.endswith(ext): return lang
-    return "python"
-# ============================================================
-# RepoMind - Hackathon Winning Features
-# Add these to your app.py to impress judges
-# ============================================================
+
+
 
 # ============================================================
 # FEATURE 1: ANIMATED HERO WITH TYPING EFFECT
@@ -4416,3 +4178,111 @@ def _show_improvement_tips(results: dict):
                 </div>
             </div>
             """, unsafe_allow_html=True)
+
+# ============================================
+# DASHBOARD - Show results after analysis
+# ============================================
+if st.session_state.analysis_complete:
+
+    results   = st.session_state.results
+    repo_info = st.session_state.repo_info
+
+    # ---- Repo Header ----
+    st.markdown(f"""
+    <div style="background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 20px; margin-bottom: 24px;">
+        <h2 style="margin:0; color: #58a6ff;">📦 {repo_info.get('name', 'Repository')}</h2>
+        <p style="color: #8b949e; margin: 4px 0;">{repo_info.get('description', '')}</p>
+        <p style="color: #8b949e; font-size: 0.85rem; margin: 0;">
+            ⭐ {repo_info.get('stars', 0)} stars  |  
+            🍴 {repo_info.get('forks', 0)} forks  |  
+            ⚠️ {repo_info.get('open_issues', 0)} open issues  |  
+            🔤 {repo_info.get('language', 'Unknown')}
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ---- RepoScore (the "wow" single number) ----
+    _display_repo_score(results)
+
+    # ---- Agent Result Tabs ----
+    tabs = st.tabs([
+        "🔍 Code Review",
+        "🔒 Security",
+        "📄 Docs",
+        "📦 Dependencies",
+        "🔧 Auto-Fix",
+        "🗺️ Risk Heatmap",
+        "🏗️ Architecture",
+        "🤖 Chatbot",
+        "⏳ Time Machine",
+    ])
+
+    # TAB 1: Code Review
+    with tabs[0]:
+        _show_code_review(results.get("code_review", {}))
+
+    # TAB 2: Security
+    with tabs[1]:
+        _show_security(results.get("security", {}))
+
+    # TAB 3: Documentation
+    with tabs[2]:
+        _show_documentation(results.get("documentation", {}))
+
+    # TAB 4: Dependencies
+    with tabs[3]:
+        _show_dependencies(results.get("dependency", {}))
+
+    # TAB 5: Bug Fix
+    with tabs[4]:
+        _show_bug_fixes(results.get("bug_fix", {}))
+
+    # TAB 6: Risk Heatmap
+    with tabs[5]:
+        _show_risk_heatmap(results.get("risk_heatmap", {}))
+
+    # TAB 7: Architecture
+    with tabs[6]:
+        _show_architecture(results.get("architecture", {}))
+
+    # TAB 8: Chatbot
+    with tabs[7]:
+        _show_chatbot()
+    with tabs[8]:
+        show_time_machine(st.session_state.get("time_machine_result") or {})
+    # ---- PDF Download ----
+    st.markdown("---")
+    st.markdown("### 📥 Download Report")
+    col_pdf1, col_pdf2, col_pdf3 = st.columns([1, 1, 2])
+    with col_pdf1:
+        if st.button("📄 Generate PDF Report", use_container_width=True):
+            with st.spinner("📄 Generating PDF..."):
+                try:
+                    pdf_bytes = generate_repomind_report(
+                        st.session_state.results,
+                        st.session_state.repo_info
+                    )
+                    repo_name = st.session_state.repo_info.get("name","repo")
+                    st.download_button(
+                        label="⬇️ Download PDF",
+                        data=pdf_bytes,
+                        file_name=f"repomind_{repo_name}_report.pdf",
+                        mime="application/pdf",
+                        use_container_width=True,
+                    )
+                    st.success("✅ PDF ready! Click Download PDF above.")
+                except Exception as e:
+                    st.error(f"❌ PDF error: {str(e)}")
+
+    _show_pr_comment_section(results, repo_info) 
+     # ---- Reset Button ----
+    st.markdown("---")
+    if st.button("🔄 Analyze Another Repository"):
+        st.session_state.analysis_complete = False
+        st.session_state.results           = {}
+        st.session_state.chatbot           = None
+        st.session_state.chat_history      = []
+        st.session_state.repo_files        = {}
+        st.session_state.repo_info         = {}
+        st.rerun()
+

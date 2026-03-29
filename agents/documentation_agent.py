@@ -65,7 +65,7 @@ def run_documentation_agent(files: dict[str, str]) -> dict:
                     })
 
     # ---- Step 2: Generate docstrings ----
-    for item in missing_docs[:3]:
+    for item in missing_docs[:1]:
         prompt = f"""Write a professional Python docstring for this {item['type']}.
 
 Code:
@@ -161,7 +161,7 @@ def _generate_module_summaries(files: dict[str, str]) -> list[dict]:
     """Generate one-line summary for each Python module."""
     summaries = []
     py_files  = {k: v for k, v in files.items() if k.endswith(".py") and len(v) > 50}
-    selected  = dict(list(py_files.items())[:6])
+    selected  = dict(list(py_files.items())[:3])
 
     for filepath, content in selected.items():
         existing_summary = ""

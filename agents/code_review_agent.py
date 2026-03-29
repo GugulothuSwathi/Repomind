@@ -39,7 +39,7 @@ def run_code_review_agent(files: dict[str, str]) -> dict:
     flagged  = set(i["file"] for i in all_issues)
     priority = {k: v for k, v in files.items() if k in flagged and any(k.endswith(e) for e in code_extensions) and len(v) < 15000}
     others   = {k: v for k, v in files.items() if k not in flagged and any(k.endswith(e) for e in code_extensions) and len(v) < 15000}
-    selected = dict(list(priority.items())[:5] + list(others.items())[:3])
+    selected = dict(list(priority.items())[:2] + list(others.items())[:1])
 
     reviewed_paths = list(selected.keys())
 

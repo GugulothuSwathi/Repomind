@@ -30,7 +30,7 @@ def run_bug_fix_agent(
     # METHOD 1: Fix directly from security agent results
     # Uses code_snippet even if file path doesn't match
     # ======================================================
-    for vuln in vulns[:6]:
+    for vuln in vulns[:2]:
         filepath = vuln.get("file", "")
         snippet  = vuln.get("code_snippet", "").strip()
 
@@ -79,7 +79,7 @@ def run_bug_fix_agent(
     # ======================================================
     # METHOD 3: Code review HIGH issues
     # ======================================================
-    for issue in code_review_results.get("issues", [])[:3]:
+    for issue in code_review_results.get("issues", [])[:1]:
         if issue.get("severity", "").upper() != "HIGH":
             continue
         already_fixed = issue.get("after_code") or issue.get("suggested_code")
